@@ -1,0 +1,30 @@
+# switch-pctltcp-remote — Server deployment
+#
+# Deploy on 飞牛OS (or any Docker host) with:
+#   cd server && docker compose up -d
+#
+# IMPORTANT: Change the PSK values before deploying!
+# LAN_SUBNETS: Networks that can access dashboard without key (comma-separated CIDRs).
+# External access MUST go through 雷池 WAF for security.
+
+services:
+  switch-ctrl:
+    build: .
+    container_name: switch-ctrl
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:8888:8888"     # Bind all interfaces so 雷池/other containers can reach it
+    environment:
+      # ┌──────────────────────────────────────────────────────────────┐
+      # │  CHANGE THESE!  Generate your own random strings.          │
+      # │  The PSK_SWITCH must match the TUNNEL_PSK in heartbeat_client.h │
+      # └──────────────────────────────────────────────────────────────┘
+      - PSK_SWITCH=sw-change-me-to-a-long-random-string
+      - PSK_ADMIN=adm-change-me-to-another-random-string
+      # LAN networks that bypass the dashboard key check (comma-separated CIDRs)
+      - LAN_SUBNETS=192.168.0.0/16,10.0.0.0/8,172.16.0.0/12
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8888/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

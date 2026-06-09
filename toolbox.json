@@ -1,0 +1,8 @@
+{
+    "name": "pctltcp-sysmodule",
+    "version": "1.5.0",
+    "author": "gmaitxqqq",
+    "description": "Switch Parental Control sysmodule with LAN + Remote control",
+    "launch_type": "boot2",
+    "requires_reboot": true
+}

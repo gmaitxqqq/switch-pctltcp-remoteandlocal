@@ -1,0 +1,14 @@
+{
+    "host": "1.2.3.4",
+    "port": 9090,
+    "psk": "sw-change-me-to-a-random-string",
+
+    "local_host": "192.168.1.100",
+    "local_port": 8000,
+    "local_psk": "local-change-me-to-a-random-string",
+
+    "_comment_interval": "heartbeat interval in seconds (default: 3, long polling mode)",
+    "_comment_connect_timeout": "connect timeout in seconds (default: 10)",
+    "_comment_recv_timeout": "recv timeout in seconds (default: 25, must be >= server long poll time + margin)",
+    "_comment_local": "local_server: LAN server for faster response (optional)"
+}
