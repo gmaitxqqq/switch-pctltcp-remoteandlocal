@@ -1105,7 +1105,7 @@ class CommandPush(BaseModel):
 
 
 @app.post("/admin/command")
-def push_command(body: CommandPush, authorization: str = Header(None)):
+async def push_command(body: CommandPush, authorization: str = Header(None)):
     _check_auth(authorization, PSK_ADMIN)
 
     valid_actions = {"add_minutes", "set_day_limit", "reset_play_time", "set_weekly_limits"}
