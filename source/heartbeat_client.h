@@ -36,6 +36,7 @@ typedef struct {
     int param;                    // 命令参数（分钟数等）
     int day_of_week;              // 指定星期几（0=Sun..6=Sat，-1=未指定）
     int weekly[7];                // 7天限额（Sun=0..Sat=6，-1=未设置）
+    char cmd_id[32];              // 服务端下发的命令唯一ID（用于回执与去重）
 } TunnelCommand;
 
 // Switch 状态数据（主循环写入，心跳线程读取）
@@ -61,5 +62,9 @@ void tunnel_force_heartbeat(void); // 命令执行后强制立即心跳（提前
 void tunnel_update_status(const TunnelStatus *status);  // 主循环调用，更新状态数据
 void tunnel_pctl_lock(void);    // pctl 互斥锁（主循环和心跳线程互斥调用 pctl）
 void tunnel_pctl_unlock(void);
+
+// 命令回执与去重（v2.0 新增，配合服务端 ack 机制）
+void tunnel_set_last_ack(const char *cmd_id, const char *result);  // 主循环执行命令后调用，记录回执
+bool tunnel_cmd_already_executed(const char *cmd_id, char *out_result, size_t rsz);  // 收命令前查重；已执行过返回 true 并写入当时结果
 
 #endif

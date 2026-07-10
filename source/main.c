@@ -207,6 +207,7 @@ static void execute_tunnel_cmd(TunnelCommand *cmd) {
     tunnel_pctl_lock();
     Result rc = pctl_init();
     if (R_FAILED(rc)) {
+        tunnel_set_last_ack(cmd->cmd_id, "fail");
         tunnel_pctl_unlock();
         log_result("tunnel: pctl_init", rc);
         return;
@@ -255,6 +256,7 @@ static void execute_tunnel_cmd(TunnelCommand *cmd) {
         log_msg(msg);
         pctl_exit();
         tunnel_pctl_unlock();
+        tunnel_set_last_ack(cmd->cmd_id, R_SUCCEEDED(rc) ? "success" : "fail");
         return;
     }
     default:
@@ -263,6 +265,8 @@ static void execute_tunnel_cmd(TunnelCommand *cmd) {
 
     pctl_exit();
     tunnel_pctl_unlock();
+
+    tunnel_set_last_ack(cmd->cmd_id, R_SUCCEEDED(rc) ? "success" : "fail");
 
     char msg[128];
     snprintf(msg, sizeof(msg), "tunnel: cmd %d param=%d dow=%d -> %s (0x%08X)",

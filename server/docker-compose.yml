@@ -1,4 +1,4 @@
-# switch-pctltcp-remote — Server deployment
+# switch-pctltcp-remote — Server deployment (v2.0)
 #
 # Deploy on 飞牛OS (or any Docker host) with:
 #   cd server && docker compose up -d
@@ -6,6 +6,10 @@
 # IMPORTANT: Change the PSK values before deploying!
 # LAN_SUBNETS: Networks that can access dashboard without key (comma-separated CIDRs).
 # External access MUST go through 雷池 WAF for security.
+#
+# v2.0 changes:
+#   - Added volume mount for SQLite DB persistence (/data/pctl_commands.db)
+#   - Added aiosqlite dependency for async SQLite
 
 services:
   switch-ctrl:
@@ -14,6 +18,9 @@ services:
     restart: unless-stopped
     ports:
       - "0.0.0.0:8888:8888"     # Bind all interfaces so 雷池/other containers can reach it
+    # P0-2: Volume mount for persistent SQLite storage
+    volumes:
+      - pctl-data:/data
     environment:
       # ┌──────────────────────────────────────────────────────────────┐
       # │  CHANGE THESE!  Generate your own random strings.          │
@@ -22,9 +29,31 @@ services:
       - PSK_SWITCH=sw-change-me-to-a-long-random-string
       - PSK_ADMIN=adm-change-me-to-another-random-string
       # LAN networks that bypass the dashboard key check (comma-separated CIDRs)
-      - LAN_SUBNETS=192.168.0.0/16,10.0.0.0/8,172.16.0.0/12
+      - LAN_SUBNETS=192.168.0.0/24,10.0.0.0/8,172.16.0.0/12
+      # ── Weekly time reclaim scheduler ──
+      # Set WEEKLY_RESET_ENABLED=false to disable the built-in scheduler
+      # (you can still call POST /admin/weekly-reset via external cron)
+      - WEEKLY_RESET_ENABLED=true
+      # Cron expression: "minute hour * * day_of_week" (CST/UTC+8)
+      # Default: every Monday at 1:00 AM
+      - WEEKLY_RESET_CRON=0 1 * * 1
+      # Minutes to set per day after reset (1 = essentially no time, not 0 which = unlimited)
+      - WEEKLY_RESET_MINUTES=1
+      # ── Database (optional override) ──
+      # Default path inside container: /data/pctl_commands.db
+      - DB_PATH=/data/pctl_commands.db
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8888/health"]
       interval: 30s
       timeout: 5s
       retries: 3
+    cap_add:
+      - SYS_ADMIN
+      - NET_ADMIN  
+    security_opt:
+      - seccomp:unconfined
+      - apparmor:unconfined
+
+volumes:
+  pctl-data:
+    driver: local

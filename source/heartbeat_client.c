@@ -186,6 +186,18 @@ void tunnel_pctl_lock(void) {
     mutexLock(&s_pctl_mutex);
 }
 
+/* ------------------------------------------------------------------ */
+/*  v2.0: 命令回执与去重（心跳线程上报，主循环写入）                     */
+/*  单一全局最近回执 + 16 槽环形去重缓冲（双隧道共用，由 s_ack_mutex 保护）*/
+/* ------------------------------------------------------------------ */
+#define TUNNEL_ACKED_MAX   16
+static char s_acked_ids[TUNNEL_ACKED_MAX][32];
+static char s_acked_results[TUNNEL_ACKED_MAX][16];
+static int  s_acked_idx = 0;
+static Mutex s_ack_mutex;
+static char s_last_ack_id[32] = "";
+static char s_last_ack_result[16] = "";
+
 void tunnel_pctl_unlock(void) {
     mutexUnlock(&s_pctl_mutex);
 }
@@ -279,6 +291,12 @@ static void parse_heartbeat_response(const char *response) {
     cmd.day_of_week = -1;
     memset(cmd.weekly, -1, sizeof(cmd.weekly));
 
+    /* v2.0: 读取服务端下发的命令唯一ID（老服务端不下发时为空，向后兼容） */
+    const char *cmd_id_val = json_find_value(cmd_val, "cmd_id");
+    if (cmd_id_val) {
+        json_read_string(cmd_id_val, cmd.cmd_id, sizeof(cmd.cmd_id));
+    }
+
     if (strcmp(action, "add_minutes") == 0) {
         cmd.type = TUNNEL_CMD_ADD_MINUTES;
     } else if (strcmp(action, "set_day_limit") == 0) {
@@ -295,6 +313,16 @@ static void parse_heartbeat_response(const char *response) {
         }
     } else {
         return;
+    }
+
+    /* v2.0: cmd_id 去重 —— 防止 ack 丢失后服务端重发导致命令被重复执行 */
+    if (cmd.cmd_id[0]) {
+        char prev_result[16] = "";
+        if (tunnel_cmd_already_executed(cmd.cmd_id, prev_result, sizeof(prev_result))) {
+            /* 已执行过（ack 可能丢失），重新回执让服务端确认，不重复执行 */
+            tunnel_set_last_ack(cmd.cmd_id, prev_result[0] ? prev_result : "success");
+            return;
+        }
     }
 
     cmd_queue_push(&cmd);
@@ -518,6 +546,16 @@ static void heartbeat_thread_func(void *arg) {
             pos += snprintf(body_buf + pos, sizeof(body_buf) - pos, "]");
         }
 
+        /* v2.0: 上报最近一次命令执行回执（服务端据此确认命令成功/失败） */
+        mutexLock(&s_ack_mutex);
+        if (s_last_ack_id[0]) {
+            pos += snprintf(body_buf + pos, sizeof(body_buf) - pos,
+                ",\"last_executed_cmd_id\":\"%s\"", s_last_ack_id);
+            pos += snprintf(body_buf + pos, sizeof(body_buf) - pos,
+                ",\"last_executed_result\":\"%s\"", s_last_ack_result);
+        }
+        mutexUnlock(&s_ack_mutex);
+
         snprintf(body_buf + pos, sizeof(body_buf) - pos, "}");
 
         /* 发送心跳 */
@@ -605,6 +643,7 @@ void tunnel_init(void) {
     mutexInit(&s_cmd_mutex);
     mutexInit(&s_status_mutex);
     mutexInit(&s_pctl_mutex);
+    mutexInit(&s_ack_mutex);
 }
 
 void tunnel_start(void) {
@@ -770,4 +809,41 @@ void tunnel_notify_wake(void) {
 void tunnel_force_heartbeat(void) {
     s_force_heartbeat_remote = true;
     s_force_heartbeat_local = true;
+}
+
+/* ------------------------------------------------------------------ */
+/*  v2.0: 命令回执与去重                                               */
+/* ------------------------------------------------------------------ */
+
+void tunnel_set_last_ack(const char *cmd_id, const char *result) {
+    if (!cmd_id || !cmd_id[0]) return;
+    mutexLock(&s_ack_mutex);
+    strncpy(s_last_ack_id, cmd_id, sizeof(s_last_ack_id) - 1);
+    s_last_ack_id[sizeof(s_last_ack_id) - 1] = '\0';
+    strncpy(s_last_ack_result, result ? result : "fail", sizeof(s_last_ack_result) - 1);
+    s_last_ack_result[sizeof(s_last_ack_result) - 1] = '\0';
+    strncpy(s_acked_ids[s_acked_idx], cmd_id, sizeof(s_acked_ids[s_acked_idx]) - 1);
+    s_acked_ids[s_acked_idx][sizeof(s_acked_ids[s_acked_idx]) - 1] = '\0';
+    strncpy(s_acked_results[s_acked_idx], result ? result : "fail", sizeof(s_acked_results[s_acked_idx]) - 1);
+    s_acked_results[s_acked_idx][sizeof(s_acked_results[s_acked_idx]) - 1] = '\0';
+    s_acked_idx = (s_acked_idx + 1) % TUNNEL_ACKED_MAX;
+    mutexUnlock(&s_ack_mutex);
+}
+
+bool tunnel_cmd_already_executed(const char *cmd_id, char *out_result, size_t rsz) {
+    if (!cmd_id || !cmd_id[0]) return false;
+    mutexLock(&s_ack_mutex);
+    bool found = false;
+    for (int i = 0; i < TUNNEL_ACKED_MAX; i++) {
+        if (strcmp(s_acked_ids[i], cmd_id) == 0) {
+            found = true;
+            if (out_result && rsz > 0) {
+                strncpy(out_result, s_acked_results[i], rsz - 1);
+                out_result[rsz - 1] = '\0';
+            }
+            break;
+        }
+    }
+    mutexUnlock(&s_ack_mutex);
+    return found;
 }
