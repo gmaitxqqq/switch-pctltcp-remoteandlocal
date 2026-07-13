@@ -35,8 +35,10 @@ services:
       # (you can still call POST /admin/weekly-reset via external cron)
       - WEEKLY_RESET_ENABLED=true
       # Cron expression: "minute hour * * day_of_week" (CST/UTC+8)
-      # Default: every Monday at 1:00 AM
-      - WEEKLY_RESET_CRON=0 1 * * 1
+      # IMPORTANT: APScheduler day_of_week uses 0=Mon..6=Sun (NOT Unix cron's 0=Sun).
+      # Use the named form 'mon' to avoid the off-by-one trap. '1' would mean TUESDAY.
+      # Default: every Monday at 1:00 AM (Beijing time)
+      - WEEKLY_RESET_CRON=0 1 * * mon
       # Minutes to set per day after reset (1 = essentially no time, not 0 which = unlimited)
       - WEEKLY_RESET_MINUTES=1
       # ── Database (optional override) ──
