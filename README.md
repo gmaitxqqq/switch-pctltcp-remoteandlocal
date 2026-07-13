@@ -30,7 +30,7 @@ Nintendo Switch 家长控制 sysmodule，**同时支持远程服务器 + 本地�
 
 - **可靠性**: 远程服务器不稳定时，本地局域网服务器作为备用通道
 - **低延迟**: 本地服务器在局域网内，命令响应更快
-- **灵活性**: 两个服务器的命令都会被执行（取先到达者）
+- **灵活性**: 两个服务器可独立下发命令；Switch 按 cmd_id 去重，确保每个命令只执行一次（避免双通道重复执行）
 
 ### 特性
 
@@ -170,22 +170,25 @@ make
 
 ### 局域网控制
 
-通过**本地服务器**的 Web UI 管理 Switch，无需经过公网：
+通过**本地服务器**（在 PVE / 家庭服务器上独立部署的 FastAPI 实例，即本仓库 `server/` 代码）的 Web UI 管理 Switch，无需经过公网：
 
-1. 确保 `tunnel.conf` 中配置了 `local_host` 和 `local_port`
-2. 浏览器访问本地服务器 UI：
+> ⚠️ **重要变更（v2.0.0）**：Switch 端**不再内置任何 HTTP 服务器**，**8081 端口已彻底废弃删除**。以前直接访问 `http://<SwitchIP>:8081` 的方式已不可用。局域网控制改为：在本地网络的一台机器上部署 `server/`（默认端口 `8000`），Switch 通过 `tunnel.conf` 的 `local_host` / `local_port` 主动连接该本地服务器，你用浏览器访问**本地服务器的 Web UI** 即可。
+
+1. 在 PVE / 家庭服务器上部署 `server/`（`docker compose up -d --build`）
+2. 确保 Switch 的 `tunnel.conf` 中配置了 `local_host` 和 `local_port`，指向该本地服务器
+3. 浏览器访问本地服务器 UI：
    ```
-   http://<本地服务器IP>:<端口>/ui/
+   http://<本地服务器IP>:<端口>/?key=adm-你的PSK_ADMIN
    ```
    - 本地服务器默认端口：`8000`（见 `server/docker-compose.yml`）
-   - 示例：`http://192.168.1.100:8000/ui/`
-3. UI 功能与远程管理面板相同，支持：
+   - 示例：`http://192.168.1.100:8000/?key=adm-xxxx`
+4. UI 功能与远程管理面板相同，支持：
    - ➕ 增加/减少游玩时间（5/10/15/20 分钟快捷按钮，支持负数）
    - 📅 设置当日时间限制
    - 📊 查看剩余/已玩时间
    - 📆 设置一周配额
 
-> 💡 本地服务器与远程服务器**同时生效**：两个通道下发的命令都会被执行（取先到达者）。
+> 💡 本地服务器与远程服务器**同时生效**：两个通道各自下发的命令都会被执行；Switch 端按 `cmd_id` 去重，确保每个命令只执行一次（避免双通道重复执行同一指令）。
 ### 远程控制
 
 **Web 管理面板**：浏览器访问 `https://你的域名/?key=adm-你的PSK_ADMIN`
@@ -259,9 +262,8 @@ curl -X POST https://你的域名/admin/command \
 ```
 ├── source/
 │   ├── main.c                 # 主程序入口 + CRT0 + 命令处理
-│   ├── http_server.c/h        # 局域网 HTTP 服务端
 │   ├── pctl_handler.c/h       # pctl IPC 封装
-│   └── heartbeat_client.c/h   # 远程心跳客户端（长轮询 + 配置文件热重载）
+│   └── heartbeat_client.c/h   # 远程/本地双心跳客户端（长轮询 + 配置文件热重载）
 ├── server/
 │   ├── app.py                 # FastAPI 服务端（长轮询 + 双 Token 认证）
 │   ├── requirements.txt
@@ -273,7 +275,8 @@ curl -X POST https://你的域名/admin/command \
 ├── toolbox.json               # Hekate 工具箱声明
 ## 版本历史
 
-- **v2.0.0** — 双通道支持（远程 + 本地局域网）、修复 WiFi 就绪后 LAN 8081 端口绑定问题
+- **v2.0.1** — Bug 修复：① 命令 `cmd_id` 增加每进程随机后缀，解决远程/本地双服务器生成同名 `cmd-0001` 被 Switch 去重环误判「已执行」而丢弃（表现为「下发时间有时不生效」）；② 周一定时回收 cron 改用 `0 1 * * mon`（APScheduler 的 `day_of_week` 用 **0=周一** 约定，`1` 会被解析成**周二**，旧值导致重置实际在周二凌晨执行、周一凌晨「没生效」）
+- **v2.0.0** — 双通道支持（远程 + 本地局域网）；**Switch 端彻底移除内置 HTTP 8081 服务器**（局域网控制改为连接本地独立部署的 FastAPI 服务器，不再由 Switch 自身提供 Web UI）
 - **v1.8.2** — 彻底修复 HTTP 服务"假死"问题（每 10 秒误重启一次）
 - **v1.8.1** — 修复休眠唤醒后 8081 端口无法访问（借鉴远程隧道思路，accept 失败时主动重建 socket）
 - **v1.8.0** — 合并 remote 架构改进：去掉 pthread_join()（修复 2168-0002），增加 client socket 超时，线程永久运行

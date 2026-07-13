@@ -34,6 +34,7 @@ Security:
 import json
 import logging
 import os
+import secrets
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -60,12 +61,11 @@ from db import (
     mark_command_status,
     log_audit,
     get_recent_audit_log,
-    cleanup_old_records,
 )
 
 logger = logging.getLogger("switch-pctl")
 
-app = FastAPI(title="Switch Parental Control Remote API", version="2.0.0")
+app = FastAPI(title="Switch Parental Control Remote API", version="2.0.1")
 
 # China Standard Time (UTC+8)
 CST = timezone(timedelta(hours=8))
@@ -116,7 +116,8 @@ LAN_SUBNETS = _parse_subnets(LAN_SUBNETS_STR)
 WEEKLY_RESET_ENABLED = os.environ.get("WEEKLY_RESET_ENABLED", "true").lower() == "true"
 WEEKLY_RESET_CRON = os.environ.get(
     "WEEKLY_RESET_CRON",
-    "0 1 * * 1"  # minute=0, hour=1, day_of_week=1 (Monday)
+    "0 1 * * mon"  # APScheduler day_of_week uses 0=Mon..6=Sun (NOT Unix cron 0=Sun).
+                   # 'mon' is unambiguous; '1' would mean TUESDAY (the old bug).
 )
 WEEKLY_RESET_MINUTES = int(os.environ.get("WEEKLY_RESET_MINUTES", "1"))
 
@@ -202,6 +203,12 @@ last_seen: dict = {
     "weekly_limits": None,
 }
 cmd_counter: int = 0
+# Per-process random suffix so cmd_id is globally unique across multiple
+# server instances (remote tunnel + local LAN server). Without it, both
+# servers start cmd_counter at 0 and emit identical "cmd-0001", which the
+# Switch's dedup ring mis-classifies as already-executed and silently drops
+# (while the server marks it ACKED) -> "下发时间有时不生效".
+_CMD_ID_SUFFIX = secrets.token_hex(3)  # 6 hex chars, stable for this process
 # Signal for long polling: wake up any waiting heartbeat connection
 cmd_event: asyncio.Event = asyncio.Event()
 
@@ -237,7 +244,7 @@ def _check_auth(authorization: str | None, expected_token: str,
 def _next_cmd_id() -> str:
     global cmd_counter
     cmd_counter += 1
-    return f"cmd-{cmd_counter:04d}"
+    return f"cmd-{cmd_counter:04d}-{_CMD_ID_SUFFIX}"
 
 
 # ===========================================================================
@@ -363,31 +370,13 @@ async def _do_weekly_reset():
     Queue set_weekly_limits [WEEKLY_RESET_MINUTES]*7.
     Idempotent: skips if already executed today.
     Returns cmd_id or None (skipped).
-
-    Ordering: stale-record cleanup MUST run *before* the new reset commands are
-    enqueued, so a retention sweep can never delete the freshly-queued weekly
-    limit commands (which start as PENDING and would otherwise be swept once
-    they turn into terminal states).
     """
     today = datetime.now(CST).strftime("%Y-%m-%d")
     if _last_reset_info.get("last_run_date") == today:
         logger.info("Weekly reset already run today (%s), skipping", today)
         return None
 
-    # ---- Clean up last week's completed records FIRST ----
-    # Runs before enqueuing the new reset, honoring the requirement that the
-    # Monday "set to 1 minute" command must never be caught by the sweep.
-    if _db_available and _db_conn:
-        try:
-            deleted = await cleanup_old_records(_db_conn, days=7)
-            if deleted:
-                logger.info("Weekly reset: cleaned up %d stale record(s) (<7d) before enqueue", deleted)
-        except Exception as exc:
-            logger.error("Weekly reset: stale cleanup failed (non-fatal): %s", exc)
-
-    global cmd_counter
-    cmd_counter += 1
-    cmd_id = f"cmd-{cmd_counter:04d}"
+    cmd_id = _next_cmd_id()
 
     record = CommandRecord(
         cmd_id=cmd_id,
@@ -499,21 +488,6 @@ async def lifespan(_app: FastAPI):
                         len(restored), len(_pending_queue))
         except Exception as exc:
             logger.error("Failed to restore pending commands: %s", exc)
-
-    # ---- Restore recent history for Dashboard display ----
-    if _db_available and _db_conn:
-        try:
-            recent = await load_recent_commands(_db_conn, limit=50)
-            seen = set(active_commands.keys())
-            # recent is DESC (newest first); reversed keeps newest at front
-            for r in reversed(recent):
-                if r.cmd_id not in seen:
-                    command_history.insert(0, r)
-            while len(command_history) > 200:
-                command_history.pop()
-            logger.info("Restored %d recent command record(s) into history view", len(command_history))
-        except Exception as exc:
-            logger.error("Failed to restore recent command history: %s", exc)
 
     # ---- Start weekly reset scheduler ----
     if WEEKLY_RESET_ENABLED:
@@ -798,6 +772,11 @@ function showToast(msg,ok){
   var t=$('toast');t.textContent=msg;t.className='toast '+(ok?'toast-ok':'toast-err')+' show';
   setTimeout(function(){t.className='toast'},2000);
 }
+function fmtErr(d, status){
+  if(d===undefined||d===null) return String(status||'unknown');
+  if(typeof d==='object'){ try{ return JSON.stringify(d); }catch(e){ return String(d); } }
+  return String(d);
+}
 function fmtMin(m,isRemaining){
   if(m===null||m===undefined||m<0) return '--';
   if(isRemaining&&m===0) return '\u5df2\u8017\u5c3d';
@@ -903,7 +882,7 @@ async function sendCmd(action,value,extra){
     });
     var d=await r.json();
     if(r.ok){showToast('\u547d\u4ee4\u5df2\u6392\u961f: '+d.cmd_id,true)}
-    else{showToast('\u9519\u8bef: '+(d.detail||r.status),false)}
+    else{showToast('\u9519\u8bef: '+fmtErr(d.detail, r.status),false)}
   }catch(e){showToast('\u7f51\u7edc\u9519\u8bef',false)}
 }
 function setWeeklyBatch(){
@@ -925,7 +904,7 @@ async function weeklyReset(){
     });
     var d=await r.json();
     if(r.ok){showToast('\u5df2\u56de\u6536: '+d.message+' ('+d.cmd_id+')',true)}
-    else{showToast('\u9519\u8bef: '+(d.detail||r.status),false)}
+    else{showToast('\u9519\u8bef: '+fmtErr(d.detail, r.status),false)}
   }catch(e){showToast('\u7f51\u7edc\u9519\u8bef',false);}
 }
 async function refreshSchedule(){
@@ -1123,11 +1102,7 @@ async def push_command(body: CommandPush, authorization: str = Header(None)):
         )
         raise HTTPException(
             status_code=429,
-            detail={
-                "status": "error",
-                "error": "queue_full",
-                "message": f"\u547d\u4ee4\u961f\u5217\u5df2\u6ee1({COMMAND_QUEUE_MAXLEN})\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5",
-            },
+            detail=f"\u547d\u4ee4\u961f\u5217\u5df2\u6ee1({COMMAND_QUEUE_MAXLEN})\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\uff08Switch \u5728\u7ebf\u65f6\u4f1a\u81ea\u52a8\u6d88\u8d39\uff09",
         )
 
     # Build command record
