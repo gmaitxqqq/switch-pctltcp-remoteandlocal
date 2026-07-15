@@ -434,6 +434,7 @@ async def _reclaim_expired_commands_loop() -> None:
                     rec.status = CmdStatus.PENDING
                     rec.delivered_at = None
                     _pending_queue.append(cid)
+                    cmd_event.set()  # 唤醒正在长轮询等待的心跳，立即重新投递回收的命令（否则要等长轮询超时+下次心跳，休眠积压命令"触发不了"）
                     if _db_available and _db_conn:
                         asyncio.create_task(persist_command(_db_conn, rec))
                     _log_command_event(
