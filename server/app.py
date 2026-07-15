@@ -85,6 +85,14 @@ DELIVERED_EXPIRE_SECONDS = 300  # 5 minutes
 # DELIVERED max retries before permanent expiry
 DELIVERED_MAX_RETRIES = 3
 
+# Re-delivery: if Switch is online (heartbeat arrived) but a DELIVERED command
+# has no ACK for longer than this, re-queue it immediately (don't wait full
+# DELIVERED_EXPIRE_SECONDS). Must exceed Switch execution window (~10s:
+# 5s main-loop interval + pctl IPC) to avoid re-delivering a command still
+# in-flight, which would cause duplicate execution. Switch-side dedup ring
+# (s_acked_ids) is the final backstop for already-executed commands.
+REDELIVERY_MIN_AGE = 15  # seconds
+
 # ---------------------------------------------------------------------------
 # Configuration -- override via environment variables
 # ---------------------------------------------------------------------------
@@ -1039,6 +1047,31 @@ async def heartbeat(
                 _update_record_status(lid, CmdStatus.FAILED,
                                       error_msg="Switch reported execution failure")
                 _log_command_event(lid, "failed", "Switch reported failure", "switch")
+
+    # 方案B: Switch 已在线（心跳到了）但有 DELIVERED 命令没收到 ACK
+    #   → 若年龄 > REDELIVERY_MIN_AGE，立即转回 PENDING 重投（不等 5 分钟超时）
+    # 三层防重复：
+    #   ① 年龄阈值(15s) > Switch 执行窗口(~10s)，避开"执行中未ack"误判
+    #   ② 保留原 cmd_id 不生成新的，Switch 去重环能识别已执行的
+    #   ③ Switch 端 s_acked_ids 兜底：重投已执行的命令会被 re-ack 不重复执行
+    now_ts = time.time()
+    for cid, rec in list(active_commands.items()):
+        if rec.status == CmdStatus.DELIVERED and rec.delivered_at is not None:
+            age = now_ts - rec.delivered_at
+            if age > REDELIVERY_MIN_AGE:
+                rec.status = CmdStatus.PENDING
+                rec.delivered_at = None
+                _pending_queue.append(cid)
+                _log_command_event(
+                    cid, "redelivered",
+                    f"Switch online without ACK, age={age:.0f}s, re-queue (keep cmd_id)",
+                    "system",
+                )
+                logger.info(
+                    "CMD [%s] re-delivered: Switch online without ACK, age=%.0fs",
+                    cid, age,
+                )
+                break  # 一次心跳最多重投一条，避免一次返回多条命令
 
     # Return next pending command immediately if available
     next_cmd = _get_next_pending_cmd()
